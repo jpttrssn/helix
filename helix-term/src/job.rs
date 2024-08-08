@@ -1,8 +1,11 @@
+use std::path::PathBuf;
+
 use helix_event::status::StatusMessage;
 use helix_event::{runtime_local, send_blocking};
-use helix_view::Editor;
+use helix_view::{DocumentId, Editor, ViewId};
 use once_cell::sync::OnceCell;
 
+use crate::commands::on_save_callback;
 use crate::compositor::Compositor;
 
 use futures_util::future::{BoxFuture, Future, FutureExt};
@@ -11,6 +14,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 pub type EditorCompositorCallback = Box<dyn FnOnce(&mut Editor, &mut Compositor) + Send>;
 pub type EditorCallback = Box<dyn FnOnce(&mut Editor) + Send>;
+pub type OnSaveCallback = Box<OnSaveCallbackData>;
 
 runtime_local! {
     static JOB_QUEUE: OnceCell<Sender<Callback>> = OnceCell::new();
@@ -35,14 +39,21 @@ pub fn dispatch_blocking(job: impl FnOnce(&mut Editor, &mut Compositor) + Send +
 pub enum Callback {
     EditorCompositor(EditorCompositorCallback),
     Editor(EditorCallback),
+    OnSave(OnSaveCallback),
 }
 
 pub type JobFuture = BoxFuture<'static, anyhow::Result<Option<Callback>>>;
 
 pub struct Job {
-    pub future: BoxFuture<'static, anyhow::Result<Option<Callback>>>,
+    pub future: JobFuture,
     /// Do we need to wait for this job to finish before exiting?
     pub wait: bool,
+}
+pub struct OnSaveCallbackData {
+    pub doc_id: DocumentId,
+    pub view_id: ViewId,
+    pub path: Option<PathBuf>,
+    pub force: bool,
 }
 
 pub struct Jobs {
@@ -99,7 +110,7 @@ impl Jobs {
         self.add(Job::with_callback(f));
     }
 
-    pub fn handle_callback(
+    pub async fn handle_callback(
         &self,
         editor: &mut Editor,
         compositor: &mut Compositor,
@@ -110,6 +121,16 @@ impl Jobs {
             Ok(Some(call)) => match call {
                 Callback::EditorCompositor(call) => call(editor, compositor),
                 Callback::Editor(call) => call(editor),
+                Callback::OnSave(callback_data) => {
+                    on_save_callback(
+                        editor,
+                        callback_data.doc_id,
+                        callback_data.view_id,
+                        callback_data.path,
+                        callback_data.force,
+                    )
+                    .await
+                }
             },
             Err(e) => {
                 editor.set_error(format!("Async job failed: {}", e));
@@ -153,7 +174,16 @@ impl Jobs {
                                 call(editor, compositor.as_deref_mut().unwrap())
                             }
                             Callback::Editor(call) => call(editor),
-
+                            Callback::OnSave(callback_data) => {
+                                on_save_callback(
+                                    editor,
+                                    callback_data.doc_id,
+                                    callback_data.view_id,
+                                    callback_data.path,
+                                    callback_data.force,
+                                )
+                                .await
+                            }
                             // skip callbacks for which we don't have the necessary references
                             _ => (),
                         }

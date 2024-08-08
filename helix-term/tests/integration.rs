@@ -19,6 +19,8 @@ mod test {
     mod auto_pairs;
     mod commands;
     mod languages;
+    #[cfg(feature = "test-lsp")]
+    mod lsp;
     mod movement;
     mod prompt;
     mod splits;

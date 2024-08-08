@@ -1438,7 +1438,7 @@ impl Document {
                 );
 
                 if let Some(notify) = notify {
-                    tokio::spawn(notify);
+                    let _ = helix_lsp::block_on(notify);
                 }
             }
         }
