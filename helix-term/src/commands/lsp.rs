@@ -797,7 +797,7 @@ pub fn code_actions_on_save(
                         )
                     });
 
-                    if let Some(lsp_item) = actions.get(0) {
+                    if let Some(lsp_item) = actions.first() {
                         items.push(CodeActionOrCommandItem {
                             lsp_item: lsp_item.clone(),
                             language_server_id,

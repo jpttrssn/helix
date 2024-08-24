@@ -3,15 +3,27 @@ use std::io::Read;
 
 use super::*;
 
+// Check that we have gopls available while also allowing
+// for gopls to initialize
 fn assert_gopls(doc: Option<&Document>) {
     assert!(doc.is_some(), "doc not found");
+    let mut ls = None;
+    let mut initialized = false;
     if let Some(doc) = doc {
-        assert!(
-            doc.language_servers()
-                .find(|s| s.name() == "gopls")
-                .is_some(),
-            "gopls language server not found"
-        );
+        for _ in 0..20 {
+            ls = doc.language_servers().find(|s| s.name() == "gopls");
+
+            if let Some(gopls) = ls {
+                if gopls.is_initialized() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    initialized = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ls.is_some(), "gopls language server not found");
+        assert!(initialized, "gopls language server not initialized in time");
     }
 }
 
@@ -37,7 +49,8 @@ async fn test_organize_imports_go() -> anyhow::Result<()> {
             }
         "#};
 
-    let mut file = tempfile::Builder::new().suffix(".go").tempfile()?;
+    let dir = tempfile::Builder::new().tempdir()?;
+    let mut file = tempfile::Builder::new().suffix(".go").tempfile_in(&dir)?;
     let mut app = helpers::AppBuilder::new()
         .with_config(Config::default())
         .with_lang_loader(helpers::test_syntax_loader(Some(lang_conf.into())))
@@ -48,8 +61,6 @@ async fn test_organize_imports_go() -> anyhow::Result<()> {
     test_key_sequences(
         &mut app,
         vec![
-            // Check that we have gopls available while also allowing
-            // for gopls to initialize before sending key sequences
             (
                 None,
                 Some(&|app| {
@@ -95,8 +106,9 @@ async fn test_organize_imports_go_multi() -> anyhow::Result<()> {
             }
         "#};
 
-    let mut file1 = tempfile::Builder::new().suffix(".go").tempfile()?;
-    let mut file2 = tempfile::Builder::new().suffix(".go").tempfile()?;
+    let dir = tempfile::Builder::new().tempdir()?;
+    let mut file1 = tempfile::Builder::new().suffix(".go").tempfile_in(&dir)?;
+    let mut file2 = tempfile::Builder::new().suffix(".go").tempfile_in(&dir)?;
     let mut app = helpers::AppBuilder::new()
         .with_config(Config::default())
         .with_lang_loader(helpers::test_syntax_loader(Some(lang_conf.into())))
@@ -114,8 +126,6 @@ async fn test_organize_imports_go_multi() -> anyhow::Result<()> {
                 )),
                 None,
             ),
-            // Check that we have gopls available while also allowing
-            // for gopls to initialize before sending key sequences
             (
                 None,
                 Some(&|app| {
@@ -173,7 +183,8 @@ async fn test_invalid_code_action_go() -> anyhow::Result<()> {
             }
         "#};
 
-    let mut file = tempfile::Builder::new().suffix(".go").tempfile()?;
+    let dir = tempfile::Builder::new().tempdir()?;
+    let mut file = tempfile::Builder::new().suffix(".go").tempfile_in(&dir)?;
     let mut app = helpers::AppBuilder::new()
         .with_config(Config::default())
         .with_lang_loader(helpers::test_syntax_loader(Some(lang_conf.into())))
@@ -184,8 +195,6 @@ async fn test_invalid_code_action_go() -> anyhow::Result<()> {
     test_key_sequences(
         &mut app,
         vec![
-            // Check that we have gopls available while also allowing
-            // for gopls to initialize before sending key sequences
             (
                 None,
                 Some(&|app| {

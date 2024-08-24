@@ -3435,8 +3435,7 @@ pub async fn on_save_callback(
     let doc = doc!(editor, &doc_id);
     if let Some(code_actions_on_save_cfg) = doc
         .language_config()
-        .map(|c| c.code_actions_on_save.clone())
-        .flatten()
+        .and_then(|c| c.code_actions_on_save.clone())
     {
         for code_action_on_save_cfg in code_actions_on_save_cfg
             .into_iter()
