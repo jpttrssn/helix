@@ -729,7 +729,7 @@ impl Application {
                             let language_id =
                                 doc.language_id().map(ToOwned::to_owned).unwrap_or_default();
 
-                            tokio::spawn(language_server.text_document_did_open(
+                            let _ = helix_lsp::block_on(language_server.text_document_did_open(
                                 url,
                                 doc.version(),
                                 doc.text(),

@@ -15,11 +15,11 @@ fn assert_gopls(doc: Option<&Document>) {
 
             if let Some(gopls) = ls {
                 if gopls.is_initialized() {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
                     initialized = true;
                     break;
                 }
             }
+            assert!(false, "had to wait");
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(ls.is_some(), "gopls language server not found");
@@ -87,7 +87,7 @@ async fn test_organize_imports_go() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_organize_imports_go_multi() -> anyhow::Result<()> {
+async fn test_organize_imports_go_write_all_quit() -> anyhow::Result<()> {
     let lang_conf = indoc! {r#"
             [[language]]
             name = "go"
@@ -135,9 +135,9 @@ async fn test_organize_imports_go_multi() -> anyhow::Result<()> {
                     assert_gopls(doc2);
                 }),
             ),
-            (Some(":wa<ret>"), None),
+            (Some(":wqa<ret>"), None),
         ],
-        false,
+        true,
     )
     .await?;
 

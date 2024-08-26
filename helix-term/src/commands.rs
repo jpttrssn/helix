@@ -58,7 +58,7 @@ use crate::{
     args,
     compositor::{self, Component, Compositor},
     filter_picker_entry,
-    job::{Callback, OnSaveCallbackData},
+    job::Callback,
     ui::{self, overlay::overlaid, Picker, PickerColumn, Popup, Prompt, PromptEvent},
 };
 
@@ -3425,7 +3425,7 @@ pub fn format_callback(
     }
 }
 
-pub async fn on_save_callback(
+pub fn on_save_callback(
     editor: &mut Editor,
     doc_id: DocumentId,
     view_id: ViewId,
@@ -3446,7 +3446,11 @@ pub async fn on_save_callback(
                 code_action_on_save_cfg
             );
             let doc = doc!(editor, &doc_id);
-            let code_actions = code_actions_on_save(doc, code_action_on_save_cfg.clone()).await;
+            // let code_actions =
+            //     helix_lsp::block_on(code_actions_on_save(doc, code_action_on_save_cfg.clone()));
+            let code_actions = tokio::task::spawn_blocking(|| {
+                code_actions_on_save(doc, code_action_on_save_cfg.clone())
+            });
 
             if code_actions.is_empty() {
                 log::debug!(
@@ -3470,16 +3474,21 @@ pub async fn on_save_callback(
         }
     }
 
+    log::debug!("CODEACTION APPLIED");
+
     if editor.config().auto_format {
         let doc = doc!(editor, &doc_id);
         if let Some(fmt) = doc.auto_format() {
-            format_callback(doc.id(), doc.version(), view_id, fmt.await, editor);
+            let fmt_result = helix_lsp::block_on(fmt);
+            format_callback(doc.id(), doc.version(), view_id, fmt_result, editor);
         }
+        log::debug!("CODEACTION FORMATTED");
     }
 
     if let Err(err) = editor.save::<PathBuf>(doc_id, path, force) {
         editor.set_error(format!("Error saving: {}", err));
     }
+    log::debug!("CODEACTION SAVED");
 }
 
 pub async fn make_on_save_callback(
@@ -3488,13 +3497,8 @@ pub async fn make_on_save_callback(
     path: Option<PathBuf>,
     force: bool,
 ) -> anyhow::Result<job::Callback> {
-    let call: job::Callback = Callback::OnSave(Box::new({
-        OnSaveCallbackData {
-            doc_id,
-            view_id,
-            path,
-            force,
-        }
+    let call = Callback::Editor(Box::new(move |editor| {
+        on_save_callback(editor, doc_id, view_id, path, force);
     }));
     Ok(call)
 }
