@@ -3397,6 +3397,45 @@ async fn make_format_callback(
 
     Ok(call)
 }
+async fn make_format_callback_old(
+    doc_id: DocumentId,
+    doc_version: i32,
+    view_id: ViewId,
+    format: impl Future<Output = Result<Transaction, FormatterError>> + Send + 'static,
+    write: Option<(Option<PathBuf>, bool)>,
+) -> anyhow::Result<job::Callback> {
+    let format = format.await;
+
+    let call: job::Callback = Callback::Editor(Box::new(move |editor| {
+        if !editor.documents.contains_key(&doc_id) || !editor.tree.contains(view_id) {
+            return;
+        }
+
+        let scrolloff = editor.config().scrolloff;
+        let doc = doc_mut!(editor, &doc_id);
+        let view = view_mut!(editor, view_id);
+
+        if let Ok(format) = format {
+            if doc.version() == doc_version {
+                doc.apply(&format, view.id);
+                doc.append_changes_to_history(view);
+                doc.detect_indent_and_line_ending();
+                view.ensure_cursor_in_view(doc, scrolloff);
+            } else {
+                log::info!("discarded formatting changes because the document changed");
+            }
+        }
+
+        if let Some((path, force)) = write {
+            let id = doc.id();
+            if let Err(err) = editor.save(id, path, force) {
+                editor.set_error(format!("Error saving: {}", err));
+            }
+        }
+    }));
+
+    Ok(call)
+}
 
 pub fn format_callback(
     doc_id: DocumentId,
@@ -3446,11 +3485,8 @@ pub fn on_save_callback(
                 code_action_on_save_cfg
             );
             let doc = doc!(editor, &doc_id);
-            // let code_actions =
-            //     helix_lsp::block_on(code_actions_on_save(doc, code_action_on_save_cfg.clone()));
-            let code_actions = tokio::task::spawn_blocking(|| {
-                code_actions_on_save(doc, code_action_on_save_cfg.clone())
-            });
+            let code_actions =
+                helix_lsp::block_on(code_actions_on_save(doc, code_action_on_save_cfg.clone()));
 
             if code_actions.is_empty() {
                 log::debug!(
@@ -3499,6 +3535,48 @@ pub async fn make_on_save_callback(
 ) -> anyhow::Result<job::Callback> {
     let call = Callback::Editor(Box::new(move |editor| {
         on_save_callback(editor, doc_id, view_id, path, force);
+    }));
+    Ok(call)
+}
+
+pub fn code_action_callback(
+    editor: &mut Editor,
+    code_action_on_save_cfg: String,
+    code_actions: Vec<CodeActionOrCommandItem>,
+) {
+    if code_actions.is_empty() {
+        log::debug!(
+            "Code action on save not found {:?}",
+            code_action_on_save_cfg
+        );
+        editor.set_error(format!(
+            "Code Action not found: {:?}",
+            code_action_on_save_cfg
+        ));
+    }
+
+    for code_action in code_actions {
+        log::debug!(
+            "Applying code action on save {:?} for language server {:?}",
+            code_action.lsp_item,
+            code_action.language_server_id
+        );
+        apply_code_action(editor, &code_action);
+    }
+}
+
+pub async fn make_code_action_callback(
+    doc: &Document,
+    code_action_on_save_cfg: String,
+) -> anyhow::Result<job::Callback> {
+    log::debug!(
+        "Attempting code action on save {:?}",
+        code_action_on_save_cfg
+    );
+    let code_actions = code_actions_on_save(doc, code_action_on_save_cfg.clone()).await;
+
+    let call = Callback::Editor(Box::new(move |editor| {
+        code_action_callback(editor, code_action_on_save_cfg, code_actions);
     }));
     Ok(call)
 }

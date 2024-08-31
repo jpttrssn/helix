@@ -1,12 +1,18 @@
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
+use anyhow::Result;
 use helix_event::status::StatusMessage;
 use helix_event::{runtime_local, send_blocking};
-use helix_view::Editor;
+use helix_lsp::lsp::CodeActionKind;
+use helix_view::{DocumentId, Editor, ViewId};
 use once_cell::sync::OnceCell;
 
 use crate::compositor::Compositor;
+use crate::stream::FuturesUnorderedSeries;
 
 use futures_util::future::{BoxFuture, Future, FutureExt};
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::stream::{FuturesOrdered, FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 pub type EditorCompositorCallback = Box<dyn FnOnce(&mut Editor, &mut Compositor) + Send>;
@@ -47,7 +53,7 @@ pub struct Job {
 
 pub struct Jobs {
     /// jobs that need to complete before we exit.
-    pub wait_futures: FuturesUnordered<JobFuture>,
+    pub wait_futures: FuturesUnorderedSeries<JobFuture>,
     pub callbacks: Receiver<Callback>,
     pub status_messages: Receiver<StatusMessage>,
 }
@@ -82,7 +88,7 @@ impl Jobs {
         let _ = JOB_QUEUE.set(tx);
         let status_messages = helix_event::status::setup();
         Self {
-            wait_futures: FuturesUnordered::new(),
+            wait_futures: FuturesUnorderedSeries::new(),
             callbacks: rx,
             status_messages,
         }
@@ -99,7 +105,7 @@ impl Jobs {
         self.add(Job::with_callback(f));
     }
 
-    pub async fn handle_callback(
+    pub fn handle_callback(
         &self,
         editor: &mut Editor,
         compositor: &mut Compositor,
@@ -117,7 +123,7 @@ impl Jobs {
         }
     }
 
-    pub fn add(&self, j: Job) {
+    pub fn add(&mut self, j: Job) {
         if j.wait {
             self.wait_futures.push(j.future);
         } else {

@@ -12,12 +12,16 @@ use crate::{
     tree::{self, Tree},
     Document, DocumentId, View, ViewId,
 };
+
 use dap::StackFrame;
 use helix_vcs::DiffProviderRegistry;
 
 use futures_util::stream::select_all::SelectAll;
 use futures_util::{future, StreamExt};
-use helix_lsp::{Call, LanguageServerId};
+use helix_lsp::{
+    lsp::{CodeAction, CodeActionKind, CodeActionOrCommand},
+    Call, LanguageServerId,
+};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use std::{
@@ -25,6 +29,7 @@ use std::{
     cell::Cell,
     collections::{BTreeMap, HashMap, HashSet},
     fs,
+    future::Future,
     io::{self, stdin},
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -1142,6 +1147,11 @@ pub enum CloseError {
     SaveError(anyhow::Error),
 }
 
+pub struct CodeActionOrCommandItem {
+    pub lsp_item: lsp::CodeActionOrCommand,
+    pub language_server_id: LanguageServerId,
+}
+
 impl Editor {
     pub fn new(
         mut area: Rect,
@@ -1328,6 +1338,15 @@ impl Editor {
     #[inline]
     pub fn language_server_by_id(
         &self,
+        language_server_id: LanguageServerId,
+    ) -> Option<&helix_lsp::Client> {
+        self.language_servers
+            .get_by_id(language_server_id)
+            .map(|client| &**client)
+    }
+
+    pub fn language_server_by_id_mut(
+        &mut self,
         language_server_id: LanguageServerId,
     ) -> Option<&helix_lsp::Client> {
         self.language_servers
@@ -1808,6 +1827,146 @@ impl Editor {
         self._refresh();
 
         Ok(())
+    }
+    pub async fn apply_code_action(&mut self, action: &CodeActionOrCommandItem) {
+        let Some(language_server) = self.language_server_by_id(action.language_server_id) else {
+            self.set_error("Language Server disappeared");
+            return;
+        };
+        let offset_encoding = language_server.offset_encoding();
+
+        match &action.lsp_item {
+            lsp::CodeActionOrCommand::Command(command) => {
+                log::debug!("code action command: {:?}", command);
+                // execute_lsp_command(action.language_server_id, command.clone());
+            }
+            lsp::CodeActionOrCommand::CodeAction(code_action) => {
+                log::debug!("code action: {:?}", code_action);
+                // we support lsp "codeAction/resolve" for `edit` and `command` fields
+                let mut resolved_code_action = None;
+                if code_action.edit.is_none() || code_action.command.is_none() {
+                    if let Some(future) = language_server.resolve_code_action(code_action.clone()) {
+                        if let Ok(response) = future.await {
+                            if let Ok(code_action) = serde_json::from_value::<CodeAction>(response)
+                            {
+                                resolved_code_action = Some(code_action);
+                            }
+                        }
+                    }
+                }
+                let resolved_code_action = resolved_code_action.as_ref().unwrap_or(code_action);
+
+                if let Some(ref workspace_edit) = resolved_code_action.edit {
+                    let _ = self.apply_workspace_edit(offset_encoding, workspace_edit);
+                }
+
+                // if code action provides both edit and command first the edit
+                // should be applied and then the command
+                // if let Some(command) = &code_action.command {
+                //     execute_lsp_command(self, action.language_server_id, command.clone());
+                // }
+            }
+        }
+    }
+
+    pub async fn on_save(&mut self, doc: &Document) {
+        if let Some(code_actions_on_save_cfg) = doc
+            .language_config()
+            .and_then(|c| c.code_actions_on_save.clone())
+        {
+            for code_action_on_save_cfg in code_actions_on_save_cfg
+                .into_iter()
+                .filter_map(|action| action.enabled.then_some(action.code_action))
+            {
+                log::debug!(
+                    "Attempting code action on save {:?}",
+                    code_action_on_save_cfg
+                );
+                let code_actions =
+                    Editor::code_actions_on_save(doc, code_action_on_save_cfg.clone()).await;
+
+                if code_actions.is_empty() {
+                    log::debug!(
+                        "Code action on save not found {:?}",
+                        code_action_on_save_cfg
+                    );
+                    self.set_error(format!(
+                        "Code Action not found: {:?}",
+                        code_action_on_save_cfg
+                    ));
+                }
+
+                for code_action in code_actions {
+                    log::debug!(
+                        "Applying code action on save {:?} for language server {:?}",
+                        code_action.lsp_item,
+                        code_action.language_server_id
+                    );
+                    self.apply_code_action(&code_action);
+                }
+            }
+        }
+
+        log::debug!("CODEACTION APPLIED");
+
+        // if self.config().auto_format {
+        //     // let doc = doc!(editor, &doc_id);
+        //     if let Some(fmt) = doc.auto_format() {
+        //         format_callback(doc.id(), doc.version(), view_id, fmt.await, editor);
+        //     }
+        //     log::debug!("CODEACTION FORMATTED");
+        // }
+
+        // if let Err(err) = editor.save::<PathBuf>(doc_id, path, force) {
+        //     editor.set_error(format!("Error saving: {}", err));
+        // }
+        // log::debug!("CODEACTION SAVED");
+    }
+
+    pub fn code_actions_on_save(
+        doc: &Document,
+        code_action_on_save: String,
+    ) -> impl Future<Output = Vec<CodeActionOrCommandItem>> {
+        let full_range = Range::new(0, doc.text().len_chars());
+        let code_action_kind = CodeActionKind::from(code_action_on_save);
+        let futures = doc.code_actions_for_range(full_range, Some(vec![code_action_kind]));
+
+        async {
+            let mut items: Vec<CodeActionOrCommandItem> = vec![];
+
+            for (request, language_server_id) in futures {
+                if let Ok(json) = request.await {
+                    if let Ok(Some(mut actions)) =
+                        serde_json::from_value::<Option<helix_lsp::lsp::CodeActionResponse>>(json)
+                    {
+                        // Retain only enabled code actions that do not have commands.
+                        //
+                        // Commands are not supported because they apply
+                        // workspace edits asynchronously and there is currently no mechanism
+                        // to handle waiting for the workspace edits to be applied before moving
+                        // on to the next code action (or auto-format).
+                        actions.retain(|action| {
+                            matches!(
+                                action,
+                                CodeActionOrCommand::CodeAction(CodeAction {
+                                    disabled: None,
+                                    command: None,
+                                    ..
+                                })
+                            )
+                        });
+
+                        if let Some(lsp_item) = actions.first() {
+                            items.push(CodeActionOrCommandItem {
+                                lsp_item: lsp_item.clone(),
+                                language_server_id,
+                            });
+                        }
+                    }
+                }
+            }
+            items
+        }
     }
 
     pub fn save<P: Into<PathBuf>>(

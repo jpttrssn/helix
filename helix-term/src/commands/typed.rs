@@ -336,18 +336,97 @@ fn write_impl(
 ) -> anyhow::Result<()> {
     let config = cx.editor.config();
     let jobs = &mut cx.jobs;
-    let (view, doc) = current!(cx.editor);
     let path = path.map(AsRef::as_ref);
 
-    if config.insert_final_newline {
-        insert_final_newline(doc, view.id);
+    let (doc_id, view_id, code_actions_on_save_cfg) = {
+        let (view, doc) = current!(cx.editor);
+
+        if config.insert_final_newline {
+            insert_final_newline(doc, view.id);
+        }
+
+        // Save an undo checkpoint for any outstanding changes.
+        doc.append_changes_to_history(view);
+
+        (
+            doc.id(),
+            view.id,
+            doc.language_config()
+                .and_then(|c| c.code_actions_on_save.clone()),
+        )
+    };
+
+    if let Some(code_actions_on_save_cfg) = code_actions_on_save_cfg {
+        for code_action_on_save_cfg in code_actions_on_save_cfg
+            .into_iter()
+            .filter_map(|action| action.enabled.then_some(action.code_action))
+        {
+            log::debug!(
+                "Attempting code action on save {:?}",
+                code_action_on_save_cfg
+            );
+            let code_actions = {
+                let doc = doc!(cx.editor, &doc_id);
+                helix_lsp::block_on(code_actions_on_save(doc, code_action_on_save_cfg.clone()))
+            };
+
+            if code_actions.is_empty() {
+                log::debug!(
+                    "Code action on save not found {:?}",
+                    code_action_on_save_cfg
+                );
+                cx.editor.set_error(format!(
+                    "Code Action not found: {:?}",
+                    code_action_on_save_cfg
+                ));
+            }
+
+            for code_action in code_actions {
+                log::debug!(
+                    "Applying code action on save {:?} for language server {:?}",
+                    code_action.lsp_item,
+                    code_action.language_server_id
+                );
+                let Some(language_server) = cx
+                    .editor
+                    .language_server_by_id(code_action.language_server_id)
+                else {
+                    cx.editor.set_error("Language Server disappeared");
+                    continue;
+                };
+                if let Some(ref workspace_edit) =
+                    apply_code_action_on_save(language_server, &code_action)
+                {
+                    let offset_encoding = language_server.offset_encoding();
+                    let _ = cx
+                        .editor
+                        .apply_workspace_edit(offset_encoding, workspace_edit);
+                }
+            }
+        }
     }
 
-    // Save an undo checkpoint for any outstanding changes.
-    doc.append_changes_to_history(view);
+    let fmt = if config.auto_format {
+        let doc = doc!(cx.editor, &doc_id);
+        doc.auto_format().map(|fmt| {
+            let callback = make_format_callback_old(
+                doc.id(),
+                doc.version(),
+                view_id,
+                fmt,
+                Some((path.map(Into::into), force)),
+            );
 
-    let callback = make_on_save_callback(doc.id(), view.id, path.map(Into::into), force);
-    jobs.add(Job::with_callback(callback).wait_before_exiting());
+            jobs.add(Job::with_callback(callback).wait_before_exiting());
+        })
+    } else {
+        None
+    };
+
+    if fmt.is_none() {
+        let id = doc_id;
+        cx.editor.save(id, path, force)?;
+    }
 
     Ok(())
 }
@@ -355,11 +434,14 @@ fn write_impl(
 fn insert_final_newline(doc: &mut Document, view_id: ViewId) {
     let text = doc.text();
     if line_ending::get_line_ending(&text.slice(..)).is_none() {
+        log::debug!("INSERTING NEW LNIE");
         let eof = Selection::point(text.len_chars());
         let insert = Transaction::insert(text, &eof, doc.line_ending.as_str().into());
         doc.apply(&insert, view_id);
     }
 }
+
+fn on_save_code_actions() {}
 
 fn write(
     cx: &mut compositor::Context,
@@ -687,18 +769,94 @@ pub fn write_all_impl(
         .collect();
 
     for (doc_id, target_view) in saves {
-        let doc = doc_mut!(cx.editor, &doc_id);
-        let view = view_mut!(cx.editor, target_view);
+        let (doc_id, view_id, code_actions_on_save_cfg) = {
+            let doc = doc_mut!(cx.editor, &doc_id);
+            let view = view_mut!(cx.editor, target_view);
 
-        if config.insert_final_newline {
-            insert_final_newline(doc, target_view);
+            if config.insert_final_newline {
+                insert_final_newline(doc, view.id);
+            }
+
+            // Save an undo checkpoint for any outstanding changes.
+            doc.append_changes_to_history(view);
+
+            (
+                doc.id(),
+                view.id,
+                doc.language_config()
+                    .and_then(|c| c.code_actions_on_save.clone()),
+            )
+        };
+
+        if let Some(code_actions_on_save_cfg) = code_actions_on_save_cfg {
+            for code_action_on_save_cfg in code_actions_on_save_cfg
+                .into_iter()
+                .filter_map(|action| action.enabled.then_some(action.code_action))
+            {
+                log::debug!(
+                    "Attempting code action on save {:?}",
+                    code_action_on_save_cfg
+                );
+                let code_actions = {
+                    let doc = doc!(cx.editor, &doc_id);
+                    helix_lsp::block_on(code_actions_on_save(doc, code_action_on_save_cfg.clone()))
+                };
+
+                if code_actions.is_empty() {
+                    log::debug!(
+                        "Code action on save not found {:?}",
+                        code_action_on_save_cfg
+                    );
+                    cx.editor.set_error(format!(
+                        "Code Action not found: {:?}",
+                        code_action_on_save_cfg
+                    ));
+                }
+
+                for code_action in code_actions {
+                    log::debug!(
+                        "Applying code action on save {:?} for language server {:?}",
+                        code_action.lsp_item,
+                        code_action.language_server_id
+                    );
+                    let Some(language_server) = cx
+                        .editor
+                        .language_server_by_id(code_action.language_server_id)
+                    else {
+                        cx.editor.set_error("Language Server disappeared");
+                        continue;
+                    };
+                    if let Some(ref workspace_edit) =
+                        apply_code_action_on_save(language_server, &code_action)
+                    {
+                        let offset_encoding = language_server.offset_encoding();
+                        let _ = cx
+                            .editor
+                            .apply_workspace_edit(offset_encoding, workspace_edit);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        let fmt = if config.auto_format {
+            let doc = doc!(cx.editor, &doc_id);
+            doc.auto_format().map(|fmt| {
+                let callback = make_format_callback_old(
+                    doc_id,
+                    doc.version(),
+                    target_view,
+                    fmt,
+                    Some((None, force)),
+                );
+                jobs.add(Job::with_callback(callback).wait_before_exiting());
+            })
+        } else {
+            None
+        };
 
-        // Save an undo checkpoint for any outstanding changes.
-        doc.append_changes_to_history(view);
-
-        let callback = make_on_save_callback(doc.id(), target_view, None, force);
-        jobs.add(Job::with_callback(callback).wait_before_exiting());
+        if fmt.is_none() {
+            cx.editor.save::<PathBuf>(doc_id, None, force)?;
+        }
     }
 
     if !errors.is_empty() && !force {

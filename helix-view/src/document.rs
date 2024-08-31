@@ -9,9 +9,11 @@ use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
 use helix_core::syntax::{Highlight, LanguageServerFeature};
 use helix_core::text_annotations::{InlineAnnotation, Overlay};
-use helix_lsp::util::lsp_pos_to_pos;
+use helix_lsp::lsp::{CodeActionKind, CodeActionTriggerKind};
+use helix_lsp::util::{diagnostic_to_lsp_diagnostic, lsp_pos_to_pos, range_to_lsp_range};
 use helix_stdx::faccess::{copy_metadata, readonly};
 use helix_vcs::{DiffHandle, DiffProviderRegistry};
+use serde_json::Value;
 use thiserror;
 
 use ::parking_lot::Mutex;
@@ -19,7 +21,7 @@ use serde::de::{self, Deserialize, Deserializer};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::future::Future;
 use std::io;
@@ -1438,7 +1440,8 @@ impl Document {
                 );
 
                 if let Some(notify) = notify {
-                    let _ = helix_lsp::block_on(notify);
+                    // let _ = helix_lsp::block_on(notify);
+                    tokio::spawn(notify);
                 }
             }
         }
@@ -2128,6 +2131,49 @@ impl Document {
     /// (since it often means inlay hints have been fully deactivated).
     pub fn reset_all_inlay_hints(&mut self) {
         self.inlay_hints = Default::default();
+    }
+
+    pub fn code_actions_for_range(
+        &self,
+        range: helix_core::Range,
+        only: Option<Vec<CodeActionKind>>,
+    ) -> Vec<(
+        impl Future<Output = Result<Value, helix_lsp::Error>>,
+        LanguageServerId,
+    )> {
+        let mut seen_language_servers = HashSet::new();
+
+        self.language_servers_with_feature(LanguageServerFeature::CodeAction)
+            .filter(|ls| seen_language_servers.insert(ls.id()))
+            // TODO this should probably already been filtered in something like "language_servers_with_feature"
+            .filter_map(|language_server| {
+                let offset_encoding = language_server.offset_encoding();
+                let language_server_id = language_server.id();
+                let lsp_range = range_to_lsp_range(self.text(), range, offset_encoding);
+                // Filter and convert overlapping diagnostics
+                let code_action_context = lsp::CodeActionContext {
+                    diagnostics: self
+                        .diagnostics()
+                        .iter()
+                        .filter(|&diag| {
+                            range
+                                .overlaps(&helix_core::Range::new(diag.range.start, diag.range.end))
+                        })
+                        .map(|diag| {
+                            diagnostic_to_lsp_diagnostic(self.text(), diag, offset_encoding)
+                        })
+                        .collect(),
+                    only: only.clone(),
+                    trigger_kind: Some(CodeActionTriggerKind::INVOKED),
+                };
+                let code_action_request = language_server.code_actions(
+                    self.identifier(),
+                    lsp_range,
+                    code_action_context,
+                )?;
+                Some((code_action_request, language_server_id))
+            })
+            .collect::<Vec<_>>()
     }
 }
 

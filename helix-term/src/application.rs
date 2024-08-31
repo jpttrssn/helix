@@ -33,7 +33,12 @@ use crate::{
 use log::{debug, error, info, warn};
 #[cfg(not(feature = "integration"))]
 use std::io::stdout;
-use std::{collections::btree_map::Entry, io::stdin, path::Path, sync::Arc};
+use std::{
+    collections::btree_map::Entry,
+    io::stdin,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[cfg(not(windows))]
 use anyhow::Context;
@@ -335,7 +340,7 @@ impl Application {
                     self.handle_terminal_events(event).await;
                 }
                 Some(callback) = self.jobs.callbacks.recv() => {
-                    self.jobs.handle_callback(&mut self.editor, &mut self.compositor, Ok(Some(callback))).await;
+                    self.jobs.handle_callback(&mut self.editor, &mut self.compositor, Ok(Some(callback)));
                     self.render().await;
                 }
                 Some(msg) = self.jobs.status_messages.recv() => {
@@ -350,9 +355,39 @@ impl Application {
                     helix_event::request_redraw();
                 }
                 Some(callback) = self.jobs.wait_futures.next() => {
-                    self.jobs.handle_callback(&mut self.editor, &mut self.compositor, callback).await;
+                    self.jobs.handle_callback(&mut self.editor, &mut self.compositor, callback);
                     self.render().await;
                 }
+                // Some(Ok(on_save_job)) = self.jobs.on_save.next() => {
+                //     let doc = doc!(self.editor, &on_save_job.doc_id);
+                //     self.editor.on_save(doc).await;
+
+                //     // if self.editor.config().auto_format {
+                //     //     if let Some(fmt) = doc.auto_format() {
+                //     //         let scrolloff = self.editor.config().scrolloff;
+                //     //         let doc = doc_mut!(self.editor, &on_save_job.doc_id);
+                //     //         let view = view_mut!(self.editor, on_save_job.view_id);
+
+                //     //         if let Ok(format) = fmt.await {
+                //     //             if doc.version() == on_save_job.doc_version {
+                //     //                 doc.apply(&format, view.id);
+                //     //                 doc.append_changes_to_history(view);
+                //     //                 doc.detect_indent_and_line_ending();
+                //     //                 view.ensure_cursor_in_view(doc, scrolloff);
+                //     //             } else {
+                //     //                 log::info!("discarded formatting changes because the document changed");
+                //     //             }
+                //     //         }
+                //     //     }
+                //     //     log::debug!("CODEACTION FORMATTED");
+                //     // }
+
+                //     if let Err(err) = self.editor.save::<PathBuf>(on_save_job.doc_id, on_save_job.path, on_save_job.force) {
+                //         self.editor.set_error(format!("Error saving: {}", err));
+                //     }
+                //     log::debug!("CODEACTION SAVED");
+                //     self.render().await;
+                // }
                 event = self.editor.wait_event() => {
                     let _idle_handled = self.handle_editor_event(event).await;
 

@@ -6,7 +6,7 @@ use helix_lsp::{
     block_on,
     lsp::{
         self, CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionTriggerKind,
-        DiagnosticSeverity, NumberOrString,
+        DiagnosticSeverity, NumberOrString, WorkspaceEdit,
     },
     util::{diagnostic_to_lsp_diagnostic, lsp_range_to_range, range_to_lsp_range},
     Client, LanguageServerId, OffsetEncoding,
@@ -847,6 +847,29 @@ pub fn apply_code_action(editor: &mut Editor, action: &CodeActionOrCommandItem) 
                 execute_lsp_command(editor, action.language_server_id, command.clone());
             }
         }
+    }
+}
+
+pub fn apply_code_action_on_save(
+    language_server: &Client,
+    action: &CodeActionOrCommandItem,
+) -> Option<WorkspaceEdit> {
+    match &action.lsp_item {
+        lsp::CodeActionOrCommand::CodeAction(code_action) => {
+            log::debug!("code action: {:?}", code_action);
+            // we support lsp "codeAction/resolve" for `edit` and `command` fields
+            if code_action.edit.is_none() || code_action.command.is_none() {
+                if let Some(future) = language_server.resolve_code_action(code_action.clone()) {
+                    if let Ok(response) = helix_lsp::block_on(future) {
+                        if let Ok(code_action) = serde_json::from_value::<CodeAction>(response) {
+                            return code_action.edit;
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None, // Commands are deprecated and not supported
     }
 }
 
